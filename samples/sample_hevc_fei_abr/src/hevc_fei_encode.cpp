@@ -21,19 +21,16 @@ or https://software.intel.com/en-us/media-client-solutions-support.
 #include "hevc_fei_encode.h"
 
 FEI_Encode::FEI_Encode(MFXVideoSession* session, MfxVideoParamsWrapper& par,
-        const mfxExtFeiHevcEncFrameCtrl& ctrl, const msdk_char* outFile,
-        const sBrcParams& brc_params, mfxU16 fastIntraModeOnI,
-        mfxU16 fastIntraModeOnP, mfxU16 fastIntraModeOnB)
+        const mfxExtFeiHevcEncFrameCtrl& general_ctrl, const PerTypeCtrl& frame_ctrl,
+        const msdk_char* outFile, const sBrcParams& brc_params)
     : m_pmfxSession(session)
     , m_mfxENCODE(*m_pmfxSession)
     , m_videoParams(par)
     , m_syncPoint(0)
     , m_dstFileName(outFile)
-    , m_defFrameCtrl(ctrl)
+    , m_defFrameCtrl(general_ctrl)
+    , m_perTypeFrameCtrl(frame_ctrl)
     , m_pBRC(CreateBRC(brc_params, m_videoParams))
-    , m_FastIntraModeOnI(fastIntraModeOnI)
-    , m_FastIntraModeOnP(fastIntraModeOnP)
-    , m_FastIntraModeOnB(fastIntraModeOnB)
 {
     m_encodeCtrl.FrameType = MFX_FRAMETYPE_UNKNOWN;
 
@@ -243,31 +240,43 @@ mfxStatus FEI_Encode::SetCtrlParams(const HevcTaskDSO& task)
 
     switch (m_encodeCtrl.FrameType  & (MFX_FRAMETYPE_I | MFX_FRAMETYPE_P | MFX_FRAMETYPE_B))
     {
-    case MFX_FRAMETYPE_I:
-        ctrl->FastIntraMode = m_FastIntraModeOnI;
-        break;
-    case MFX_FRAMETYPE_P:
-        ctrl->FastIntraMode = m_FastIntraModeOnP;
-        break;
-    case MFX_FRAMETYPE_B:
-        ctrl->FastIntraMode = task.m_isGPBFrame ? m_FastIntraModeOnP : m_FastIntraModeOnB;
-        break;
-    default:
-        throw mfxError(MFX_ERR_UNDEFINED_BEHAVIOR, "Invalid m_encodeCtrl.FrameType");
-        break;
+        case MFX_FRAMETYPE_I:
+            ctrl->FastIntraMode = m_perTypeFrameCtrl.CtrlI.FastIntraMode;
+            ctrl->ForceCtuSplit = m_perTypeFrameCtrl.CtrlI.ForceCtuSplit;
+            ctrl->NumFramePartitions = m_perTypeFrameCtrl.CtrlI.NumFramePartitions;
+            break;
+        case MFX_FRAMETYPE_P:
+            ctrl->FastIntraMode = m_perTypeFrameCtrl.CtrlP.FastIntraMode;
+            ctrl->ForceCtuSplit = m_perTypeFrameCtrl.CtrlP.ForceCtuSplit;
+            ctrl->NumFramePartitions = m_perTypeFrameCtrl.CtrlP.NumFramePartitions;
+            break;
+        case MFX_FRAMETYPE_B:
+            if (task.m_isGPBFrame)
+            {
+                ctrl->FastIntraMode = m_perTypeFrameCtrl.CtrlP.FastIntraMode;
+                ctrl->ForceCtuSplit = m_perTypeFrameCtrl.CtrlP.ForceCtuSplit;
+                ctrl->NumFramePartitions = m_perTypeFrameCtrl.CtrlP.NumFramePartitions;
+            }
+            else
+            {
+                ctrl->FastIntraMode = m_perTypeFrameCtrl.CtrlB.FastIntraMode;
+                ctrl->ForceCtuSplit = m_perTypeFrameCtrl.CtrlB.ForceCtuSplit;
+                ctrl->NumFramePartitions = m_perTypeFrameCtrl.CtrlB.NumFramePartitions;
+            }
+            break;
+        default:
+            throw mfxError(MFX_ERR_UNDEFINED_BEHAVIOR, "Invalid m_encodeCtrl.FrameType");
+            break;
     }
 
-    if (task.m_ctuCtrl.get())
+    ctrl->PerCtuInput = (m_encodeCtrl.FrameType & MFX_FRAMETYPE_I) ? 0 : m_defFrameCtrl.PerCtuInput;
+
+    if (ctrl->PerCtuInput && task.m_ctuCtrl.get())
     {
-        ctrl->PerCtuInput = (m_encodeCtrl.FrameType & MFX_FRAMETYPE_I) ? 0 : m_defFrameCtrl.PerCtuInput;
+        mfxExtFeiHevcEncCtuCtrl* pCtuCtrl = m_encodeCtrl.GetExtBuffer<mfxExtFeiHevcEncCtuCtrl>();
+        MSDK_CHECK_POINTER(pCtuCtrl, MFX_ERR_NOT_INITIALIZED);
 
-        if (ctrl->PerCtuInput)
-        {
-            mfxExtFeiHevcEncCtuCtrl* pCtuCtrl = m_encodeCtrl.GetExtBuffer<mfxExtFeiHevcEncCtuCtrl>();
-            MSDK_CHECK_POINTER(pCtuCtrl, MFX_ERR_NOT_INITIALIZED);
-
-            *pCtuCtrl = *task.m_ctuCtrl; // shallow copy
-        }
+        *pCtuCtrl = *task.m_ctuCtrl; // shallow copy
     }
 
     return MFX_ERR_NONE;
